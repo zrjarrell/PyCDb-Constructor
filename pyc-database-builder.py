@@ -117,7 +117,6 @@ def updateStructure(pycRow, massChange):
     pycRow["S"] += massChange[5]
     return pycRow
 
-
 #makes starter table based on range of subunits (smallest:largest) to use
 def getBasePyCs(smallest, largest, massChanges):
     basePyClist = pd.DataFrame(columns = ["monoisotopic.mass", "base.pyc", "cys.num", "C", "H", "N", "O", "S"])
@@ -133,20 +132,31 @@ def getBasePyCs(smallest, largest, massChanges):
 
 #determines maximum number of disulfides and creates all possibilities from 0 to maximum
 def calcDisulfides(PyCTable, massChanges):
-    disulfides = pd.DataFrame(columns = list(PyCTable.columns) + ["disulfides"])
+    disulfidesList = []
     for i in PyCTable.index:
         maxSS = PyCTable.loc[i, "cys.num"] // 2
         for s in range(0, maxSS+1):
-            disulfides.loc[len(disulfides)] = updateStructure(PyCTable.loc[i], [x * s for x in massChanges.disulfide]).append(pd.Series([s], ["disulfides"]))
+            workingRow = PyCTable.loc[i].copy()
+            workingRow = updateStructure(workingRow, [x * s for x in massChanges.disulfide])
+            newRow = {k: workingRow[k] for k in PyCTable.columns}
+            newRow["disulfides"] = s
+            disulfidesList += [newRow]
+    disulfides = pd.DataFrame.from_dict(disulfidesList)
     return disulfides
 
 #determines all possible thiolates among available reduced cysteines. creates all possibilities and records formal charge
 def calcThiolates(PyCTable, massChanges):
-    thiolates = pd.DataFrame(columns = list(PyCTable.columns) + ["thiolates",  "charge"])
+    thiolatesList = []
     for i in PyCTable.index:
         maxThiolates = PyCTable.loc[i, "cys.num"] - 2 * PyCTable.loc[i, "disulfides"]
         for t in range(0, maxThiolates+1):
-            thiolates.loc[len(thiolates)] = updateStructure(PyCTable.loc[i], [x * t for x in massChanges.thiolate]).append(pd.Series([t, -t], ["thiolates",  "charge"]))
+            workingRow = PyCTable.loc[i].copy()
+            workingRow = updateStructure(workingRow, [x * t for x in massChanges.thiolate])
+            newRow = {k: workingRow[k] for k in PyCTable.columns}
+            newRow["thiolates"] = t
+            newRow["charge"] = -t
+            thiolatesList += [newRow]
+    thiolates = pd.DataFrame.from_dict(thiolatesList)
     return thiolates
 
 ####Building out Dictionary of Cation Combinations#####
@@ -235,7 +245,6 @@ def stringifyCombos(comboDict):
         for combo in comboDict[key]:
             combo.stringify()
 
-#took roughly 7-8 hours with all options applied to PyC2-5 and min=-1 and max=-2
 def alignPyCCombos(PyCTable, comboDict, minCharge, maxCharge):
     #creates empty DF to store results with appropriate headers
     conjugateTable = pd.DataFrame(columns = list(PyCTable.columns) + ["cations", "metals"])
@@ -272,12 +281,9 @@ def alignPyCCombos(PyCTable, comboDict, minCharge, maxCharge):
     conjugateTable = conjugateTable.sort_values(by=["charge", "cys.num", "disulfides", "thiolates", "monoisotopic.mass"])
     return conjugateTable
 
-
-
-
-
 def createPseudocharges(conjugateTable,  massChanges, minCharge, maxCharge):
     pseudoCharged = pd.DataFrame(columns = conjugateTable.columns)
+    pseudoList = []
     for charge in range(minCharge, maxCharge+1):
         conjugateSubset = conjugateTable[conjugateTable["charge"] == charge].copy()
         if charge == 0:
@@ -285,9 +291,16 @@ def createPseudocharges(conjugateTable,  massChanges, minCharge, maxCharge):
         else:
             change = [x * charge for x in massChanges.thiolate]
             print(f'Pseudocharging conjugates with charge = {charge}.')
-            for i in range(0, len(conjugateSubset.index)):
-                pseudoCharged.loc[len(pseudoCharged)] = updateStructure(conjugateSubset.loc[conjugateSubset.index[i]], change)
-                progressBar(i, len(conjugateSubset.index)-1)
+            c = 0
+            for i in conjugateSubset.index:
+                workingRow = conjugateSubset.loc[i].copy()
+                modified = updateStructure(workingRow, change)
+                pseudoRow = {k: modified[k] for k in conjugateSubset.columns}
+                pseudoList += [pseudoRow]
+                progressBar(c, len(conjugateSubset)-1)
+                c += 1
+    modifiedDF = pd.DataFrame.from_dict(pseudoList)
+    pseudoCharged = pd.concat([pseudoCharged, modifiedDF], ignore_index=True)
     pseudoCharged["pseudocharge.mod"] = -pseudoCharged["charge"]
     return pseudoCharged
 
@@ -296,41 +309,60 @@ def reducePseudocharges(pseudocharged):
     reduced = pd.concat([reduced, pseudocharged[pseudocharged["pseudocharge.mod"]==0]].copy(), ignore_index=True)
     reduced = pd.concat([reduced, pseudocharged[pseudocharged["pseudocharge.mod"]!=0]].copy(), ignore_index=True)
     reduced.drop_duplicates(subset=["monoisotopic.mass", "base.pyc", "cys.num", "C", "H", "N", "O", "S", "disulfides"], keep='first', inplace=True)
+    reduced.reset_index(inplace=True, drop=True)
     return reduced
 
-
-
-
-
 #calculates de-gamma-glutamylation metabolites, assuming presence of GGT
-def calcGGTmetabs(PyCTable, massDict):
-    GGTmetabs = pd.DataFrame(columns = ["seq.name", "seq.mass", "base.pyc", "cys.num", "ggt.metab"])
+def calcGGTmetabs(PyCTable, massChanges):
+    c = 0
+    GGTmetabsList = []
     for i in PyCTable.index:
-        desE = PyCTable.loc[i, "monoisotopic.mass"] + massDict.desE
-        GGTmetabs.loc[len(GGTmetabs)] = [PyCTable.loc[i,"base.pyc"], PyCTable.loc[i,"monoisotopic.mass"],
-                                         PyCTable.loc[i,"base.pyc"], PyCTable.loc[i,"cys.num"], 0]
-        GGTmetabs.loc[len(GGTmetabs)] = ["des.yE." + PyCTable.loc[i,"base.pyc"], desE,
-                                         PyCTable.loc[i,"base.pyc"], PyCTable.loc[i,"cys.num"], 1]
+        workingRow = PyCTable.loc[i].copy()
+        nonmetabData = {k: workingRow[k] for k in PyCTable.columns}
+        nonmetabData['ggt.metab'] = 0
+        modified = updateStructure(workingRow, massChanges.desE)
+        metabData = {k: modified[k] for k in PyCTable.columns}
+        metabData['ggt.metab'] = 1
+        GGTmetabsList += [nonmetabData, metabData]
+        progressBar(c, len(PyCTable)-1)
+        c += 1
+    GGTmetabs = pd.DataFrame.from_dict(GGTmetabsList)
     return GGTmetabs
 
 #calculates various forms by carboxy-terminal AA. Defaults to all possibilities
-def calcCarboxyTerm(PyCTable, massDict, options= ["G", "S", "Q", "A", "E"]):
-    carboxyTerms = pd.DataFrame(columns = ["seq.name", "seq.mass", "base.pyc", "cys.num", "ggt.metab", "c.terminus"])
-    basePyCcounter = 0
+def calcCarboxyTerm(PyCTable, massChanges, options= ["G", "S", "Q", "A", "E"]):
+    c = 0
+    carboxyTermsList = []
     for i in PyCTable.index:
-        if len(carboxyTerms) != 0 and PyCTable.loc[i, "base.pyc"] != PyCTable.loc[i-1, "base.pyc"]:
-            basePyCcounter = len(carboxyTerms)
-        carboxyTerms.loc[len(carboxyTerms)] = [PyCTable.loc[i, "seq.name"], PyCTable.loc[i, "seq.mass"],
-                                               PyCTable.loc[i, "base.pyc"], PyCTable.loc[i, "cys.num"],
-                                               PyCTable.loc[i, "ggt.metab"], "X"]
+        nonmetabData = {k: PyCTable.loc[i][k] for k in PyCTable.columns}
+        nonmetabData['carboxy.terminal'] = "X"
+        carboxyTermsList += [nonmetabData]
         for terminus in options:
-            if terminus == "E" and "des.yE." in PyCTable.loc[i, "seq.name"]:
-                carboxyTerms.loc[basePyCcounter, "seq.name"] = carboxyTerms.loc[basePyCcounter, "seq.name"] + "; " + PyCTable.loc[i, "seq.name"] + "." + terminus
-            else:
-                carboxyTerms.loc[len(carboxyTerms)] = [PyCTable.loc[i, "seq.name"] + "." + terminus, PyCTable.loc[i, "seq.mass"] + massDict.__dict__[terminus],
-                                                        PyCTable.loc[i, "base.pyc"], PyCTable.loc[i, "cys.num"],
-                                                        PyCTable.loc[i, "ggt.metab"], terminus]
+            workingRow = PyCTable.loc[i].copy()
+            modified = updateStructure(workingRow, massChanges.__dict__[terminus])
+            metabData = {k: modified[k] for k in PyCTable.columns}
+            metabData['carboxy.terminal'] = terminus
+            carboxyTermsList += [metabData]
+        progressBar(c, len(PyCTable)-1)
+        c += 1
+    carboxyTerms = pd.DataFrame.from_dict(carboxyTermsList)
     return carboxyTerms
+
+def makeDB(PyCTable):
+    pycDb = pd.DataFrame(columns = ["id", "name", "monoisotopic.mass", "formula"])
+    c = 0
+    ids = []
+    masses = []
+    formulas = []
+    for i in PyCTable.index:
+        ids += ["pyc" + ("0" * (8-len(str(i+1)))) + str(i+1)]
+        masses += [PyCTable.loc[i, "monoisotopic.mass"]]
+        formulas += ["C" + str(PyCTable.loc[i, "C"]) + "H" + str(PyCTable.loc[i, "H"]) + "N" + str(PyCTable.loc[i, "N"]) + "O" + str(PyCTable.loc[i, "O"]) + "S" + str(PyCTable.loc[i, "S"])]
+        progressBar(c, len(PyCTable)-1)
+        c+=1
+    pycDb = pd.DataFrame({"id": ids, "name": ids, "monoisotopic.mass": masses, "formula": formulas})
+    PyCTable["id"] = ids
+    return pycDb, PyCTable
 
 
 PyCTable = getBasePyCs(2, 5, massChanges)
@@ -348,11 +380,13 @@ stringifyCombos(comboDict)
 
 conjugateTable = alignPyCCombos(PyCTable, comboDict, minCharge, maxCharge)
 
+conjugateTable = createPseudocharges(conjugateTable, massChanges, minCharge, maxCharge)
+conjugateTable = reducePseudocharges(conjugateTable)
 
+conjugateTable = calcGGTmetabs(conjugateTable, massChanges)
+conjugateTable = calcCarboxyTerm(conjugateTable, massChanges)
 
+pycDb, finalTable = makeDB(conjugateTable)
 
-pseudocharged = createPseudocharges(conjugateTable, massChanges, minCharge, maxCharge)
-
-
-PyCTable = calcGGTmetabs(PyCTable, massChanges)
-PyCTable = calcCarboxyTerm(PyCTable, massChanges)
+pycDb.to_csv("C:/Users/zjarrel/Desktop/pyc-database/annotator-database.txt", sep="\t")
+finalTable.to_csv("C:/Users/zjarrel/Desktop/pyc-database/full-database.txt", sep="\t")
